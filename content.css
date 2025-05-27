@@ -1,0 +1,16 @@
+/* content.css - Optional: For highlighting or visual feedback */
+
+/* Example: Highlight the chatbox when detected (for debugging or user awareness) */
+
+div#_7jl0sa5haChatbotContainer, div._chatBotContainer {
+    border: 3px solid red !important;
+}
+
+
+/* Example: Highlight selected job tuples */
+
+article.jobTuple.extension-selected {
+    background-color: #e6f7ff !important;
+    border-left: 5px solid #1890ff !important;
+}
+

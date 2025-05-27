@@ -1,17 +1,26 @@
 {
   "manifest_version": 3,
-  "name": "Naukri AutoApply",
-  "description": "Automatically apply to recommended jobs on Naukri.com",
-  "version": "1.0",
-  "permissions": ["scripting", "tabs"],
-  "host_permissions": ["https://www.naukri.com/*"],
+  "name": "Naukri Job Application Automator",
+  "version": "1.0.0",
+  "description": "Assists in automating job applications on Naukri.com's recommended jobs page.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "tabs",
+    "notifications"
+  ],
+  "host_permissions": [
+    "*://*.naukri.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["*://www.naukri.com/mnjuser/recommendedjobs*"],
-      "js": ["content.js"]
+      "matches": ["*://*.naukri.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"]
     }
   ],
   "action": {

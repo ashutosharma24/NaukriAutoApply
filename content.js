@@ -1,413 +1,254 @@
-// content.js - Runs on the recommended jobs page
-console.log("Naukri AutoApply: Content script loaded");
+// content.js
 
-// Global variables
-let isProcessing = false;
-let chatOverlayObserver = null;
+console.log("Content.js (v5): Script execution started. Timestamp:", Date.now());
 
-// Start the automation process when the page is fully loaded
-window.addEventListener('load', () => {
-  console.log("Page loaded, starting auto-apply process");
-  setTimeout(initAutoApply, 2000); // Give the page a moment to fully render
-});
+const RECOMMENDED_JOBS_URL_MATCHER = "/mnjuser/recommendedjobs";
+const CONFIRMATION_URL_SUBSTRING_MATCHER = "/myapply/saveApply";
+const CHATBOX_SELECTOR = "div#_7jl0sa5haChatbotContainer, div._chatBotContainer";
+const CHATBOX_LOADER_SELECTOR = "div.chatbot_loadMore";
+const CHECKBOX_ACTIVE_CLASS = 'naukicon-ot-Checked'; 
+const JOB_ARTICLE_SELECTOR = 'article.jobTuple';
+const JOB_CHECKBOX_CONTAINER_SELECTOR = 'div.tuple-check-box';
+const JOB_CHECKBOX_ICON_SELECTOR = 'i.naukicon'; 
+const JOB_TITLE_SELECTOR = '.title';
+const MAIN_APPLY_BUTTON_SELECTOR = 'button.multi-apply-button';
+const TABS_CONTAINER_SELECTOR = '.tabs-container';
+const TAB_WRAPPER_BASE_SELECTOR = '.tab-wrapper'; 
+const TAB_LIST_ITEM_SELECTOR = '.tab-list-item';
+const TAB_ACTIVE_CLASS = 'tab-list-active'; 
 
-// Initialize the auto-apply process
-function initAutoApply() {
-  console.log("Initializing auto-apply");
-  
-  // Check if we're on the right page
-  if (!window.location.href.includes("naukri.com/mnjuser/recommendedjobs")) {
-    console.log("Not on the recommended jobs page, exiting");
-    return;
-  }
-  
-  // Check if the page has finished loading job listings
-  const checkPageReady = () => {
-    const jobListings = findJobCheckboxes();
+let chatboxObserver = null;
+
+console.log("Content.js (v5): Constants defined. CHECKBOX_ACTIVE_CLASS:", CHECKBOX_ACTIVE_CLASS);
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function performClick(element, description) {
+    if (element && typeof element.click === 'function') {
+        console.log(`Content.js (v5): Clicking ${description}`);
+        element.click();
+        await sleep(150 + Math.random() * 100); 
+        return true;
+    }
+    console.warn(`Content.js (v5): ${description} not found or not clickable.`);
+    return false;
+}
+
+async function switchToTab(targetTabId) {
+    console.log(`Content.js (v5): Attempting to switch to tab with ID: '${targetTabId}'`);
+    const tabWrapper = document.querySelector(`${TABS_CONTAINER_SELECTOR} ${TAB_WRAPPER_BASE_SELECTOR}#${targetTabId}`);
     
-    if (jobListings.length > 0) {
-      console.log(`Page ready with ${jobListings.length} job listings`);
-      // Start the auto-apply cycle if automation is active
-      if (autoApplyActive) {
-        autoApplyCycle();
-      }
+    if (!tabWrapper) {
+        console.warn(`Content.js (v5): Tab wrapper for ID '${targetTabId}' not found.`);
+        chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: targetTabId, error: 'Tab wrapper not found' });
+        return;
+    }
+
+    const tabListItem = tabWrapper.querySelector(TAB_LIST_ITEM_SELECTOR);
+    if (!tabListItem) {
+        console.warn(`Content.js (v5): Tab list item within wrapper ID '${targetTabId}' not found.`);
+        chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: targetTabId, error: 'Tab list item not found' });
+        return;
+    }
+
+    if (tabListItem.classList.contains(TAB_ACTIVE_CLASS)) {
+        console.log(`Content.js (v5): Tab '${targetTabId}' is already active.`);
+        chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: true, switchedToTabId: targetTabId, alreadyActive: true });
+        return;
+    }
+
+    console.log(`Content.js (v5): Clicking tab list item for '${targetTabId}'.`);
+    await performClick(tabListItem, `Tab list item for '${targetTabId}'`);
+    await sleep(1500); 
+
+    const tabListItemAfterClick = document.querySelector(`${TABS_CONTAINER_SELECTOR} ${TAB_WRAPPER_BASE_SELECTOR}#${targetTabId} ${TAB_LIST_ITEM_SELECTOR}`);
+    if (tabListItemAfterClick && tabListItemAfterClick.classList.contains(TAB_ACTIVE_CLASS)) {
+        console.log(`Content.js (v5): Successfully switched to tab '${targetTabId}'.`);
+        chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: true, switchedToTabId: targetTabId, alreadyActive: false });
     } else {
-      console.log("Page not ready yet, waiting...");
-      // Try again after a delay
-      setTimeout(checkPageReady, 1000);
+        console.warn(`Content.js (v5): Failed to confirm switch to tab '${targetTabId}'. Tab did not become active.`);
+        chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: targetTabId, error: 'Tab did not become active after click' });
     }
-  };
-  
-  // Start checking if the page is ready
-  checkPageReady();
 }
 
-// The main auto-apply cycle function
-function autoApplyCycle() {
-  console.log("Starting auto-apply cycle");
-  
-  // If automation is disabled or already processing, don't start another cycle
-  if (!autoApplyActive) {
-    console.log("Auto-apply is disabled, exiting cycle");
-    return;
-  }
-  
-  if (isProcessing) {
-    console.log("Already processing, skipping");
-    return;
-  }
-  
-  // Check if chat overlay is present
-  if (isChatOverlayPresent()) {
-    console.log("Chat overlay detected, waiting for user input");
-    observeChatOverlay();
-    return;
-  }
-  
-  // Start processing
-  isProcessing = true;
-  
-  // Find job checkboxes
-  const jobCheckboxes = findJobCheckboxes();
-  console.log(`Found ${jobCheckboxes.length} job checkboxes`);
-  
-  // If no job checkboxes found, try to wait and retry
-  if (jobCheckboxes.length === 0) {
-    console.log("No job checkboxes found, waiting and retrying");
-    isProcessing = false;
-    
-    // Try again after a delay if auto-apply is still active
-    setTimeout(() => {
-      if (autoApplyActive) {
-        console.log("Retrying auto-apply cycle");
-        autoApplyCycle();
-      }
-    }, 3000);
-    return;
-  }
-  
-  // Select up to 5 unchecked jobs
-  const selectedJobs = selectJobCheckboxes(jobCheckboxes, 5);
-  console.log(`Selected ${selectedJobs} jobs`);
-  
-  // If no jobs were selected, we might be done
-  if (selectedJobs === 0) {
-    // Check if there are any jobs that are already selected
-    const anySelected = document.querySelectorAll('[class*="checkbox-selected"]').length > 0;
-    
-    if (anySelected) {
-      console.log("No new jobs selected but some are already selected, proceeding to apply");
-      // Click the apply button since there are already selected jobs
-      setTimeout(() => {
-        clickApplyButton();
-      }, 1000);
-    } else {
-      console.log("No more jobs to apply for");
-      isProcessing = false;
-      return;
-    }
-  } else {
-    // Click the apply button for newly selected jobs
-    setTimeout(() => {
-      clickApplyButton();
-    }, 1000);
-  }
-}
+async function selectAndApplyJobs(startIndex, maxJobs) {
+    console.log(`Content.js (v5): --- Starting selectAndApplyJobs --- Received StartIndex: ${startIndex}, MaxJobs: ${maxJobs}`);
+    let jobsSelectedCount = 0;
+    const allJobArticles = Array.from(document.querySelectorAll(JOB_ARTICLE_SELECTOR));
+    console.log(`Content.js (v5): Found ${allJobArticles.length} total job articles on the current tab.`);
 
-// Find job checkboxes on the page
-function findJobCheckboxes() {
-  // Based on the provided DOM structure
-  // Checkboxes are in the dspIB saveJobContainer tuple-check-box divs
-  const checkboxContainers = document.querySelectorAll('.dspIB.saveJobContainer.tuple-check-box');
-  
-  // Fallback to other potential selectors if the primary one doesn't work
-  if (!checkboxContainers || checkboxContainers.length === 0) {
-    const fallbacks = [
-      document.querySelectorAll('.tuple-check-box'),
-      document.querySelectorAll('.jobTuple .saveJobContainer'),
-      document.querySelectorAll('.jobTuple [class*="check-box"]')
-    ];
-    
-    for (const selector of fallbacks) {
-      if (selector && selector.length > 0) {
-        return Array.from(selector);
-      }
+    if (allJobArticles.length === 0) {
+        console.log("Content.js (v5): No job articles found on the current tab.");
+        chrome.runtime.sendMessage({ command: 'noJobsToApply', message: "No job articles found on current tab." });
+        return;
     }
-  }
-  
-  return Array.from(checkboxContainers);
-}
+    
+    if (startIndex >= allJobArticles.length && allJobArticles.length > 0) { 
+        console.log(`Content.js (v5): Start index (${startIndex}) is beyond available jobs (${allJobArticles.length}) on current tab.`);
+        chrome.runtime.sendMessage({ command: 'noJobsToApply', message: "Start index beyond available jobs on current tab." });
+        return;
+    }
+    
+    let currentJobIndexOnPage = 0; 
+    let unappliedJobsFoundAndAttemptedThisRun = 0;
 
-// Select up to maxCount unchecked job checkboxes
-function selectJobCheckboxes(checkboxes, maxCount) {
-  let selectedCount = 0;
-  
-  // Get already checked boxes - use multiple selector options based on the DOM structure
-  const checkedBoxesSelectors = [
-    '.dspIB.saveJobContainer.tuple-check-box i.naukicon-ot-checkbox-selected',
-    '.tuple-check-box i.naukicon-ot-checkbox-selected',
-    '.jobTuple .saveJobContainer i[class*="checkbox-selected"]'
-  ];
-  
-  let checkedBoxes = [];
-  for (const selector of checkedBoxesSelectors) {
-    const selected = document.querySelectorAll(selector);
-    if (selected && selected.length > 0) {
-      checkedBoxes = selected;
-      break;
-    }
-  }
-  
-  console.log(`Already checked boxes: ${checkedBoxes.length}`);
-  
-  // If we already have 5 checked, don't do anything
-  if (checkedBoxes.length >= 5) {
-    console.log("Already have 5 jobs selected");
-    clickApplyButton();
-    return 0;
-  }
-  
-  // How many more we can select
-  const remainingSelections = 5 - checkedBoxes.length;
-  
-  for (const container of checkboxes) {
-    // Find the checkbox icon - try multiple possible selectors
-    const checkbox = container.querySelector('i.naukicon-ot-checkbox') || 
-                     container.querySelector('i[class*="checkbox"]:not([class*="selected"])');
-    
-    // If this checkbox is not already selected and we haven't reached max count
-    if (checkbox && !checkbox.classList.contains('naukicon-ot-checkbox-selected') && selectedCount < remainingSelections) {
-      // Click the checkbox
-      console.log("Clicking a checkbox");
-      checkbox.click();
-      selectedCount++;
-      
-      // If we've reached the max, stop
-      if (selectedCount >= maxCount) {
-        break;
-      }
-    }
-  }
-  
-  return selectedCount;
-}
+    for (const jobArticle of allJobArticles) {
+        const jobTitleElement = jobArticle.querySelector(JOB_TITLE_SELECTOR);
+        const jobTitle = jobTitleElement ? jobTitleElement.title : 'Unknown Title';
+        const jobId = jobArticle.getAttribute('data-job-id') || 'Unknown Job ID';
 
-// Click the apply button
-function clickApplyButton() {
-  console.log("Attempting to click apply button");
-  
-  // Find the apply button - using multiple possible selectors based on the DOM structure
-  const applyButtonSelectors = [
-    '.multi-apply-button',
-    'button.multi-apply-button',
-    '.head-body .fright button',
-    'button:contains("Apply")',
-    '[class*="apply-button"]'
-  ];
-  
-  let applyButton = null;
-  
-  // Try each selector until we find a match
-  for (const selector of applyButtonSelectors) {
-    try {
-      if (selector.includes(':contains')) {
-        // Handle the jQuery-like :contains selector
-        const text = selector.match(/:contains\("(.+?)"\)/)[1];
-        const buttons = Array.from(document.querySelectorAll('button'));
-        applyButton = buttons.find(btn => btn.textContent.includes(text));
-      } else {
-        applyButton = document.querySelector(selector);
-      }
-      
-      if (applyButton) break;
-    } catch (error) {
-      console.error(`Error with selector ${selector}:`, error);
-    }
-  }
-  
-  if (applyButton) {
-    console.log("Found apply button:", applyButton);
-    
-    // Check if button is disabled
-    if (applyButton.disabled || applyButton.classList.contains('opaque-button')) {
-      console.log("Apply button is disabled, enabling it");
-      // Enable the button if possible
-      applyButton.disabled = false;
-      applyButton.classList.remove('opaque-button');
-    }
-    
-    // Click the apply button
-    console.log("Clicking apply button");
-    applyButton.click();
-    
-    // Reset the processing flag after a delay
-    setTimeout(() => {
-      isProcessing = false;
-    }, 5000);
-  } else {
-    console.log("Apply button not found");
-    isProcessing = false;
-  }
-}
-
-// Check if chat overlay is present
-function isChatOverlayPresent() {
-  // Based on the provided DOM structure for the chatbot container
-  const chatSelectors = [
-    '[id$="ChatbotContainer"]',
-    '[class*="chatbot_Drawer"]',
-    '[class*="_chatBotContainer"]',
-    '.chatbot_Drawer',
-    '.chatbot_MessageContainer'
-  ];
-  
-  for (const selector of chatSelectors) {
-    const element = document.querySelector(selector);
-    if (element) {
-      console.log("Chat overlay detected using selector:", selector);
-      return true;
-    }
-  }
-  
-  return false;
-}
-
-// Observe the chat overlay for changes
-function observeChatOverlay() {
-  console.log("Setting up chat overlay observer");
-  
-  // If we already have an observer, disconnect it
-  if (chatOverlayObserver) {
-    chatOverlayObserver.disconnect();
-    chatOverlayObserver = null;
-  }
-  
-  // Find the chat container using multiple possible selectors
-  const chatContainerSelectors = [
-    '[id$="ChatbotContainer"]',
-    '[class*="chatbot_Drawer"]',
-    '[class*="_chatBotContainer"]',
-    '.chatbot_MessageContainer'
-  ];
-  
-  let chatContainer = null;
-  for (const selector of chatContainerSelectors) {
-    chatContainer = document.querySelector(selector);
-    if (chatContainer) break;
-  }
-  
-  // If no chat container found, use body as fallback
-  if (!chatContainer) {
-    console.log("No chat container found, using body as fallback");
-    chatContainer = document.body;
-  } else {
-    console.log("Found chat container:", chatContainer);
-  }
-  
-  // Check for the save/submit button in the chat
-  const saveButton = document.querySelector('.sendMsg') || 
-                     document.querySelector('[class*="send"] [class*="save"]') ||
-                     document.querySelector('[class*="send"] [class*="Save"]');
-                     
-  if (saveButton) {
-    console.log("Found save button in chat:", saveButton);
-    // We'll just watch for click events on this button in addition to the mutation observer
-    saveButton.addEventListener('click', function saveBtnHandler() {
-      console.log("Save button clicked, checking in 3 seconds if overlay is still present");
-      setTimeout(() => {
-        if (!isChatOverlayPresent()) {
-          console.log("Chat overlay removed after save button click");
-          // Remove the event listener to prevent multiple triggers
-          saveButton.removeEventListener('click', saveBtnHandler);
-          
-          if (autoApplyActive) {
-            isProcessing = false;
-            setTimeout(autoApplyCycle, 1000);
-          }
+        if (currentJobIndexOnPage < startIndex) {
+            currentJobIndexOnPage++;
+            continue; 
         }
-      }, 3000);
-    });
-  }
-  
-  // Set up a mutation observer to watch for the removal of the chat overlay
-  chatOverlayObserver = new MutationObserver((mutations) => {
-    // Only check every second at most to avoid excessive checks
-    if (!chatOverlayCheckTimeout) {
-      chatOverlayCheckTimeout = setTimeout(() => {
-        // Check if the chat overlay is still present
-        const stillPresent = isChatOverlayPresent();
-        console.log("Checking if chat overlay still present:", stillPresent);
+        if (unappliedJobsFoundAndAttemptedThisRun >= maxJobs) break; 
+
+        const checkboxContainer = jobArticle.querySelector(JOB_CHECKBOX_CONTAINER_SELECTOR);
+        const checkboxIcon = checkboxContainer ? checkboxContainer.querySelector(JOB_CHECKBOX_ICON_SELECTOR) : null;
         
-        if (!stillPresent) {
-          console.log("Chat overlay no longer present, resuming process");
-          if (chatOverlayObserver) {
-            chatOverlayObserver.disconnect();
-            chatOverlayObserver = null;
-          }
-          
-          clearTimeout(chatOverlayCheckTimeout);
-          chatOverlayCheckTimeout = null;
-          
-          if (autoApplyActive) {
-            isProcessing = false;
-            setTimeout(autoApplyCycle, 1000);
-          }
-        } else {
-          chatOverlayCheckTimeout = null;
+        if (!checkboxContainer || !checkboxIcon) {
+            if (unappliedJobsFoundAndAttemptedThisRun < maxJobs && currentJobIndexOnPage < maxJobs + 3) {
+                console.warn(`Content.js (v5): Checkbox container/icon not found for job "${jobTitle}" (ID: ${jobId}). Skipping.`);
+            }
+            currentJobIndexOnPage++;
+            continue;
         }
-      }, 1000);
+
+        const isAlreadySelected = checkboxIcon.classList.contains(CHECKBOX_ACTIVE_CLASS);
+        if (isAlreadySelected) {
+            // console.log(`Content.js (v5): Job "${jobTitle}" (ID: ${jobId}) is ALREADY SELECTED. Skipping.`);
+        } else {
+            if (checkboxIcon.classList.contains('naukicon-ot-checkbox')) { 
+                console.log(`Content.js (v5): Attempting to select job: "${jobTitle}" (ID: ${jobId}).`);
+                await performClick(checkboxContainer, `Job checkbox for "${jobTitle}"`);
+                await sleep(500); 
+                const iconAfterClick = checkboxContainer.querySelector(JOB_CHECKBOX_ICON_SELECTOR); 
+                if (iconAfterClick && iconAfterClick.classList.contains(CHECKBOX_ACTIVE_CLASS)) { 
+                    console.log(`Content.js (v5): SUCCESS - Job "${jobTitle}" (ID: ${jobId}) checkbox is now active.`);
+                    unappliedJobsFoundAndAttemptedThisRun++;
+                } else {
+                    console.warn(`Content.js (v5): FAILURE - Job "${jobTitle}" (ID: ${jobId}) checkbox did NOT become active with class '${CHECKBOX_ACTIVE_CLASS}'.`);
+                }
+            }
+        }
+        currentJobIndexOnPage++;
     }
-  });
-  
-  // Start observing with a comprehensive configuration
-  chatOverlayObserver.observe(chatContainer, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    characterData: false
-  });
-  
-  // Also observe the body for changes that might indicate removal of overlay
-  chatOverlayObserver.observe(document.body, {
-    childList: true,
-    subtree: false
-  });
-  
-  console.log("Chat overlay observer set up");
+    
+    jobsSelectedCount = unappliedJobsFoundAndAttemptedThisRun;
+    console.log(`Content.js (v5): Total jobs selected in this run on current tab: ${jobsSelectedCount}`);
+
+    if (jobsSelectedCount === 0) {
+        console.log("Content.js (v5): No new jobs were selected in this run on current tab.");
+        chrome.runtime.sendMessage({ command: 'noJobsToApply', message: "No new jobs were selected in this run on current tab." });
+        return;
+    }
+
+    const applyButton = document.querySelector(MAIN_APPLY_BUTTON_SELECTOR);
+    if (applyButton) {
+        let retries = 20; 
+        while (applyButton.disabled && retries > 0) {
+            await sleep(500);
+            retries--;
+        }
+        if (applyButton.disabled) {
+            console.error("Content.js (v5): Main Apply button did not enable after selecting jobs.");
+            chrome.runtime.sendMessage({ command: 'errorOccurred', error: "Apply button stuck disabled", message: "Apply button did not enable." });
+            return;
+        }
+        console.log("Content.js (v5): Main Apply button is enabled. Clicking it.");
+        if (await performClick(applyButton, "Main Apply button")) {
+            chrome.runtime.sendMessage({ command: 'jobsSelectedAndApplied', jobsAttemptedCount: jobsSelectedCount });
+            observeForChatbox();
+        } else {
+             chrome.runtime.sendMessage({ command: 'errorOccurred', error: "Failed to click Apply button", message: "Could not click Apply button." });
+        }
+    } else {
+        console.error(`Content.js (v5): Main Apply button not found with selector '${MAIN_APPLY_BUTTON_SELECTOR}'.`);
+        chrome.runtime.sendMessage({ command: 'errorOccurred', error: "Apply button not found", message: "Main Apply button selector missing." });
+    }
+    console.log(`Content.js (v5): --- Finished selectAndApplyJobs ---`);
 }
 
-// Add a timeout tracker for chat overlay checks
-let chatOverlayCheckTimeout = null;
+function observeForChatbox() {
+    if (chatboxObserver) chatboxObserver.disconnect(); 
+    const targetNode = document.body;
+    const config = { childList: true, subtree: true };
+    chatboxObserver = new MutationObserver(() => {
+        const chatboxElement = document.querySelector(CHATBOX_SELECTOR);
+        if (chatboxElement && chatboxElement.offsetParent !== null) { 
+            if (!chatboxElement.querySelector(CHATBOX_LOADER_SELECTOR)) {
+                 console.log("Content.js (v5): Chatbox is not loading. Notifying background.");
+                 chrome.runtime.sendMessage({ command: 'chatboxDetected' });
+                 if(chatboxObserver) chatboxObserver.disconnect(); 
+                 chatboxObserver = null;
+            }
+        }
+    });
+    chatboxObserver.observe(targetNode, config);
+    console.log("Content.js (v5): Observer for chatbox started.");
+    setTimeout(() => {
+        if (chatboxObserver) chatboxObserver.disconnect();
+        chatboxObserver = null;
+    }, 15000);
+}
 
-// Listen for messages from the background script
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log("Message received:", message);
-  
-  if (message.action === "startAutoApply") {
-    console.log("Received start auto-apply message");
-    isProcessing = false;
-    autoApplyActive = true;
-    autoApplyCycle();
-    sendResponse({status: "started"});
-  }
-  
-  if (message.action === "stopAutoApply") {
-    console.log("Received stop auto-apply message");
-    autoApplyActive = false;
-    isProcessing = false;
-    if (chatOverlayObserver) {
-      chatOverlayObserver.disconnect();
-      chatOverlayObserver = null;
+function runInitialChecks() {
+    const currentURL = window.location.href;
+    console.log("Content.js (v5): runInitialChecks() called. URL:", currentURL);
+    if (currentURL.includes(CONFIRMATION_URL_SUBSTRING_MATCHER)) {
+        console.log("Content.js (v5): On confirmation page.");
+        if (chatboxObserver) chatboxObserver.disconnect();
+        chrome.runtime.sendMessage({ command: 'confirmationPageReached' });
+    } else if (currentURL.includes(RECOMMENDED_JOBS_URL_MATCHER)) {
+        const existingChatbox = document.querySelector(CHATBOX_SELECTOR);
+        if (existingChatbox && existingChatbox.offsetParent !== null) {
+            if (!existingChatbox.querySelector(CHATBOX_LOADER_SELECTOR)) {
+                chrome.runtime.sendMessage({ command: 'chatboxDetected' });
+            }
+        }
     }
-    sendResponse({status: "stopped"});
-  }
-  
-  // Always return true to indicate async response
-  return true;
+    console.log("Content.js (v5): runInitialChecks() finished.");
+}
+
+console.log("Content.js (v5): Setting up chrome.runtime.onMessage listener.");
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    const receivedAction = request.action ? String(request.action).trim() : undefined;
+    console.log(`Content.js (v5): Message received. Original action: '${request.action}', Trimmed action: '${receivedAction}'`);
+
+    if (receivedAction === 'selectAndApplyJobs') {
+        console.log(`Content.js (v5): Matched 'selectAndApplyJobs'. StartIndex: ${request.startIndex}`);
+        const attemptSelection = () => {
+            selectAndApplyJobs(request.startIndex, request.maxJobs)
+                .catch(err => {
+                    console.error("Content.js (v5): Error in selectAndApplyJobs promise:", err);
+                    chrome.runtime.sendMessage({ command: 'errorOccurred', error: err.message, message: "Content script failed during job selection." });
+                });
+        };
+        if (document.readyState === "complete" || document.readyState === "interactive") {
+            attemptSelection();
+        } else {
+            window.addEventListener('DOMContentLoaded', attemptSelection, { once: true });
+        }
+        sendResponse({ status: "selectAndApplyJobs_initiated" }); 
+        return true; 
+    } else if (receivedAction === 'switchToTab') {
+        console.log(`Content.js (v5): Matched 'switchToTab'. Target ID: ${request.targetTabId}`);
+        switchToTab(request.targetTabId)
+            .catch(err => {
+                console.error("Content.js (v5): Error in switchToTab promise:", err);
+                chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: request.targetTabId, error: `Exception during tab switch: ${err.message}` });
+            });
+        sendResponse({ status: "switchToTab_initiated" });
+        return true; 
+    } else {
+        console.log(`Content.js (v5): Received unknown or undefined action. Original: '${request.action}', Trimmed: '${receivedAction}'`);
+        sendResponse({ status: "unknown_action", received_action: receivedAction });
+        // No return true needed here as sendResponse is synchronous for this else block
+    }
 });
+console.log("Content.js (v5): chrome.runtime.onMessage listener SET UP.");
 
-// Global flag to track if auto-apply is active
-let autoApplyActive = true;
-
-// Notify the background script that the content script is loaded
-chrome.runtime.sendMessage({action: "contentScriptLoaded"});
+runInitialChecks();
+console.log("Content.js (v5): Script execution finished.");
