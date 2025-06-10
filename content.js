@@ -1,11 +1,10 @@
-// content.js
+// content.js (User-Selected Tab & Chat Logic v1)
 
-console.log("Content.js (v5): Script execution started. Timestamp:", Date.now());
+console.log("Content.js (User-Selected Tab): Script execution started.");
 
+// --- Constants ---
 const RECOMMENDED_JOBS_URL_MATCHER = "/mnjuser/recommendedjobs";
 const CONFIRMATION_URL_SUBSTRING_MATCHER = "/myapply/saveApply";
-const CHATBOX_SELECTOR = "div#_7jl0sa5haChatbotContainer, div._chatBotContainer";
-const CHATBOX_LOADER_SELECTOR = "div.chatbot_loadMore";
 const CHECKBOX_ACTIVE_CLASS = 'naukicon-ot-Checked'; 
 const JOB_ARTICLE_SELECTOR = 'article.jobTuple';
 const JOB_CHECKBOX_CONTAINER_SELECTOR = 'div.tuple-check-box';
@@ -17,238 +16,302 @@ const TAB_WRAPPER_BASE_SELECTOR = '.tab-wrapper';
 const TAB_LIST_ITEM_SELECTOR = '.tab-list-item';
 const TAB_ACTIVE_CLASS = 'tab-list-active'; 
 
-let chatboxObserver = null;
+const CHATBOX_MAIN_CONTAINER_SELECTOR = "div._chatBotContainer";
+const CHATBOX_MESSAGE_LIST_SELECTOR = "div.chatbot_MessageContainer ul.list"; 
+const CHATBOX_BOT_MESSAGE_ITEM_SELECTOR = "li.botItem.chatbot_ListItem"; 
+const CHATBOX_QUESTION_TEXT_SELECTOR = "div.botMsg > div > span"; 
+const CHATBOX_TEXT_INPUT_SELECTOR = "div.textArea[contenteditable='true']"; 
+const CHATBOX_SUBMIT_BUTTON_SELECTOR = "div.sendMsgbtn_container .sendMsg"; 
 
-console.log("Content.js (v5): Constants defined. CHECKBOX_ACTIVE_CLASS:", CHECKBOX_ACTIVE_CLASS);
+// --- Global variables ---
+let isChatboxUiVisible = false;
+let currentFullQuestionText = null;
+let currentNormalizedQuestion = null; 
+let lastProcessedBotMessageNode = null; 
+let chatboxVisibilityObserver = null; 
+let chatboxMessagesObserver = null; 
+let chatboxSubmitButton = null; 
+let chatboxSubmitButtonListenerAttached = false; 
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+const STOP_WORDS = new Set([
+    'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'has', 'had', 'do', 'does', 'did', 
+    'will', 'would', 'should', 'can', 'could', 'may', 'might', 'must', 'i', 'you', 'he', 'she', 'it', 'we', 'they',
+    'me', 'your', 'him', 'her', 'us', 'them', 'my', 'his', 'its', 'our', 'their', 'what', 'which', 'who', 'whom', 
+    'this', 'that', 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'in', 'on', 'at', 'by', 'for', 'with', 
+    'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 
+    'up', 'down', 'out', 'off', 'how', 'many', 'please', 'kindly', 'tell', 'me', 'of', 'experience', 'salary', 'ctc',
+    'expected', 'notice', 'period', 'current', 'location', 'years', 'yr', 'yrs', 'relevant', 'per', 'annum', 'lakhs'
+]); 
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function normalizeQuestionText(text) {
+    if (!text) return "";
+    const cleanedText = text.toLowerCase().replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ");
+    const words = cleanedText.split(" ");
+    const keywords = words.filter(word => word.length > 1 && !STOP_WORDS.has(word));
+    return keywords.sort().join("|"); 
 }
-
 async function performClick(element, description) {
     if (element && typeof element.click === 'function') {
-        console.log(`Content.js (v5): Clicking ${description}`);
+        console.log(`Content.js: Clicking ${description}`);
         element.click();
-        await sleep(150 + Math.random() * 100); 
+        await sleep(200); 
         return true;
     }
-    console.warn(`Content.js (v5): ${description} not found or not clickable.`);
+    console.warn(`Content.js: ${description} not found or not clickable.`);
     return false;
 }
 
+// --- New Function to Detect Active Tab ---
+function detectAndSendActiveTab() {
+    console.log("Content.js: Attempting to detect active Naukri tab.");
+    const activeTabListItem = document.querySelector(`${TABS_CONTAINER_SELECTOR} ${TAB_LIST_ITEM_SELECTOR}.${TAB_ACTIVE_CLASS}`);
+    if (activeTabListItem) {
+        const activeTabWrapper = activeTabListItem.closest(TAB_WRAPPER_BASE_SELECTOR);
+        if (activeTabWrapper && activeTabWrapper.id) {
+            console.log(`Content.js: Found active tab wrapper with ID: '${activeTabWrapper.id}'. Sending to background.`);
+            chrome.runtime.sendMessage({ command: 'setActiveTabAndStart', activeTabId: activeTabWrapper.id });
+            return;
+        }
+    }
+    console.warn("Content.js: Could not find an active Naukri tab element.");
+    chrome.runtime.sendMessage({ command: 'setActiveTabAndStart', activeTabId: null }); // Inform background that none was found
+}
+
+// --- Chatbox Functions (largely unchanged) ---
+function handleNewBotQuestion(questionElement) {
+    if (!questionElement || questionElement === lastProcessedBotMessageNode) return;
+    lastProcessedBotMessageNode = questionElement;
+    const questionTextElement = questionElement.querySelector(CHATBOX_QUESTION_TEXT_SELECTOR);
+    if (questionTextElement) {
+        currentFullQuestionText = questionTextElement.textContent.trim();
+        currentNormalizedQuestion = normalizeQuestionText(currentFullQuestionText);
+        console.log(`Content.js: New Question: "${currentFullQuestionText}" (Normalized: "${currentNormalizedQuestion}")`);
+        chrome.runtime.sendMessage({ command: 'chatboxQuestionPresented', questionText: currentFullQuestionText });
+        if (currentNormalizedQuestion) {
+            chrome.runtime.sendMessage({ command: 'getChatAnswer', normalizedQuestion: currentNormalizedQuestion }, (response) => {
+                if (response && response.answerData) {
+                    console.log("Content.js: Received stored answer:", response.answerData);
+                    prefillAnswer(response.answerData);
+                }
+            });
+        }
+    }
+}
+function prefillAnswer(answerData) {
+    if (!answerData || !answerData.answer) return;
+    const activeChatbox = document.querySelector(CHATBOX_MAIN_CONTAINER_SELECTOR + ":not([style*='display: none'])");
+    if (!activeChatbox) return;
+    const textInput = activeChatbox.querySelector(CHATBOX_TEXT_INPUT_SELECTOR);
+    if (textInput && (answerData.inputType === 'text' || !answerData.inputType)) {
+        textInput.textContent = answerData.answer; 
+        textInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    // TODO: Add logic for other input types
+}
+function getCurrentAnswerFromInputs() {
+    const activeChatbox = document.querySelector(CHATBOX_MAIN_CONTAINER_SELECTOR + ":not([style*='display: none'])");
+    if (!activeChatbox) return { answer: null, inputType: 'unknown' };
+    const textInput = activeChatbox.querySelector(CHATBOX_TEXT_INPUT_SELECTOR);
+    if (textInput && textInput.textContent.trim() !== "") {
+        return { answer: textInput.textContent.trim(), inputType: 'text' };
+    }
+    return { answer: null, inputType: 'unknown' }; 
+}
+async function handleChatSubmit() {
+    if (!currentNormalizedQuestion || !isChatboxUiVisible) return;
+    const { answer, inputType } = getCurrentAnswerFromInputs();
+    if (answer !== null && answer !== "") { 
+        console.log(`Content.js: User submitted answer for "${currentFullQuestionText}". Answer: "${answer}"`);
+        const storedAnswerResponse = await chrome.runtime.sendMessage({ command: 'getChatAnswer', normalizedQuestion: currentNormalizedQuestion });
+        let answerSource = (storedAnswerResponse && storedAnswerResponse.answerData) ? 'user_corrected' : 'user_provided_new';
+        if (storedAnswerResponse && storedAnswerResponse.answerData && storedAnswerResponse.answerData.answer === answer) answerSource = 'user_confirmed_prefill';
+        chrome.runtime.sendMessage({ command: 'storeChatAnswer', normalizedQuestion: currentNormalizedQuestion, answer, inputType, answerSource });
+    }
+    await sleep(500); 
+    currentFullQuestionText = null;
+    currentNormalizedQuestion = null;
+    lastProcessedBotMessageNode = null; 
+}
+function setupChatboxSubmitListener() {
+    if (chatboxSubmitButtonListenerAttached) return;
+    const activeChatbox = document.querySelector(CHATBOX_MAIN_CONTAINER_SELECTOR + ":not([style*='display: none'])");
+    if (!activeChatbox) return;
+    chatboxSubmitButton = activeChatbox.querySelector(CHATBOX_SUBMIT_BUTTON_SELECTOR);
+    if (chatboxSubmitButton) {
+        chatboxSubmitButton.removeEventListener('click', handleChatSubmit, true); 
+        chatboxSubmitButton.addEventListener('click', handleChatSubmit, true); 
+        chatboxSubmitButtonListenerAttached = true;
+    }
+}
+function removeChatboxSubmitListener() {
+    if (chatboxSubmitButton && chatboxSubmitButtonListenerAttached) {
+        chatboxSubmitButton.removeEventListener('click', handleChatSubmit, true);
+        chatboxSubmitButtonListenerAttached = false;
+    }
+}
+function startChatboxMessagesObserver(chatboxElement) {
+    if (chatboxMessagesObserver) chatboxMessagesObserver.disconnect();
+    const messageList = chatboxElement.querySelector(CHATBOX_MESSAGE_LIST_SELECTOR);
+    if (!messageList) return;
+    chatboxMessagesObserver = new MutationObserver((mutationsList) => {
+        mutationsList.forEach(mutation => {
+            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                mutation.addedNodes.forEach(node => {
+                    if (node.nodeType === Node.ELEMENT_NODE && node.matches(CHATBOX_BOT_MESSAGE_ITEM_SELECTOR) && node.querySelector(CHATBOX_QUESTION_TEXT_SELECTOR)) {
+                         handleNewBotQuestion(node);
+                    }
+                });
+            }
+        });
+        if(isChatboxUiVisible && !chatboxSubmitButtonListenerAttached) setupChatboxSubmitListener();
+    });
+    chatboxMessagesObserver.observe(messageList, { childList: true });
+    const existingBotMessages = messageList.querySelectorAll(`${CHATBOX_BOT_MESSAGE_ITEM_SELECTOR}:has(${CHATBOX_QUESTION_TEXT_SELECTOR})`);
+    if (existingBotMessages.length > 0) handleNewBotQuestion(existingBotMessages[existingBotMessages.length - 1]);
+    if(isChatboxUiVisible && !chatboxSubmitButtonListenerAttached) setupChatboxSubmitListener();
+}
+function stopChatboxMessagesObserver() {
+    if (chatboxMessagesObserver) chatboxMessagesObserver.disconnect();
+    removeChatboxSubmitListener();
+}
+function initializeChatboxDetection() {
+    if (chatboxVisibilityObserver) chatboxVisibilityObserver.disconnect();
+    chatboxVisibilityObserver = new MutationObserver(() => {
+        const chatboxElement = document.querySelector(CHATBOX_MAIN_CONTAINER_SELECTOR);
+        const nowVisible = chatboxElement && chatboxElement.offsetParent !== null;
+        if (nowVisible && !isChatboxUiVisible) {
+            console.log("Content.js: Chatbox became visible.");
+            isChatboxUiVisible = true;
+            lastProcessedBotMessageNode = null; 
+            startChatboxMessagesObserver(chatboxElement);
+        } else if (!nowVisible && isChatboxUiVisible) {
+            console.log("Content.js: Chatbox became hidden.");
+            isChatboxUiVisible = false;
+            stopChatboxMessagesObserver();
+            currentFullQuestionText = null; 
+            currentNormalizedQuestion = null;
+        }
+    });
+    chatboxVisibilityObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+    const chatboxElement = document.querySelector(CHATBOX_MAIN_CONTAINER_SELECTOR);
+    if (chatboxElement && chatboxElement.offsetParent !== null) {
+        if (!isChatboxUiVisible) {
+            isChatboxUiVisible = true;
+            startChatboxMessagesObserver(chatboxElement);
+        }
+    } else {
+        isChatboxUiVisible = false;
+    }
+}
+
+// --- General Page Functions (Tab Switching, Job Selection) ---
 async function switchToTab(targetTabId) {
-    console.log(`Content.js (v5): Attempting to switch to tab with ID: '${targetTabId}'`);
+    console.log(`Content.js: Attempting to switch to tab with ID: '${targetTabId}'`);
     const tabWrapper = document.querySelector(`${TABS_CONTAINER_SELECTOR} ${TAB_WRAPPER_BASE_SELECTOR}#${targetTabId}`);
-    
     if (!tabWrapper) {
-        console.warn(`Content.js (v5): Tab wrapper for ID '${targetTabId}' not found.`);
         chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: targetTabId, error: 'Tab wrapper not found' });
         return;
     }
-
     const tabListItem = tabWrapper.querySelector(TAB_LIST_ITEM_SELECTOR);
     if (!tabListItem) {
-        console.warn(`Content.js (v5): Tab list item within wrapper ID '${targetTabId}' not found.`);
         chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: targetTabId, error: 'Tab list item not found' });
         return;
     }
-
     if (tabListItem.classList.contains(TAB_ACTIVE_CLASS)) {
-        console.log(`Content.js (v5): Tab '${targetTabId}' is already active.`);
+        console.log(`Content.js: Tab '${targetTabId}' is already active.`);
         chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: true, switchedToTabId: targetTabId, alreadyActive: true });
         return;
     }
-
-    console.log(`Content.js (v5): Clicking tab list item for '${targetTabId}'.`);
     await performClick(tabListItem, `Tab list item for '${targetTabId}'`);
     await sleep(1500); 
-
     const tabListItemAfterClick = document.querySelector(`${TABS_CONTAINER_SELECTOR} ${TAB_WRAPPER_BASE_SELECTOR}#${targetTabId} ${TAB_LIST_ITEM_SELECTOR}`);
     if (tabListItemAfterClick && tabListItemAfterClick.classList.contains(TAB_ACTIVE_CLASS)) {
-        console.log(`Content.js (v5): Successfully switched to tab '${targetTabId}'.`);
         chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: true, switchedToTabId: targetTabId, alreadyActive: false });
     } else {
-        console.warn(`Content.js (v5): Failed to confirm switch to tab '${targetTabId}'. Tab did not become active.`);
-        chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: targetTabId, error: 'Tab did not become active after click' });
+        chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: targetTabId, error: 'Tab did not become active' });
     }
 }
-
 async function selectAndApplyJobs(startIndex, maxJobs) {
-    console.log(`Content.js (v5): --- Starting selectAndApplyJobs --- Received StartIndex: ${startIndex}, MaxJobs: ${maxJobs}`);
+    console.log(`Content.js: --- Starting selectAndApplyJobs ---`);
     let jobsSelectedCount = 0;
     const allJobArticles = Array.from(document.querySelectorAll(JOB_ARTICLE_SELECTOR));
-    console.log(`Content.js (v5): Found ${allJobArticles.length} total job articles on the current tab.`);
-
     if (allJobArticles.length === 0) {
-        console.log("Content.js (v5): No job articles found on the current tab.");
-        chrome.runtime.sendMessage({ command: 'noJobsToApply', message: "No job articles found on current tab." });
+        chrome.runtime.sendMessage({ command: 'noJobsToApply' });
         return;
     }
-    
-    if (startIndex >= allJobArticles.length && allJobArticles.length > 0) { 
-        console.log(`Content.js (v5): Start index (${startIndex}) is beyond available jobs (${allJobArticles.length}) on current tab.`);
-        chrome.runtime.sendMessage({ command: 'noJobsToApply', message: "Start index beyond available jobs on current tab." });
-        return;
-    }
-    
-    let currentJobIndexOnPage = 0; 
     let unappliedJobsFoundAndAttemptedThisRun = 0;
-
     for (const jobArticle of allJobArticles) {
-        const jobTitleElement = jobArticle.querySelector(JOB_TITLE_SELECTOR);
-        const jobTitle = jobTitleElement ? jobTitleElement.title : 'Unknown Title';
-        const jobId = jobArticle.getAttribute('data-job-id') || 'Unknown Job ID';
-
-        if (currentJobIndexOnPage < startIndex) {
-            currentJobIndexOnPage++;
-            continue; 
-        }
         if (unappliedJobsFoundAndAttemptedThisRun >= maxJobs) break; 
-
         const checkboxContainer = jobArticle.querySelector(JOB_CHECKBOX_CONTAINER_SELECTOR);
         const checkboxIcon = checkboxContainer ? checkboxContainer.querySelector(JOB_CHECKBOX_ICON_SELECTOR) : null;
-        
-        if (!checkboxContainer || !checkboxIcon) {
-            if (unappliedJobsFoundAndAttemptedThisRun < maxJobs && currentJobIndexOnPage < maxJobs + 3) {
-                console.warn(`Content.js (v5): Checkbox container/icon not found for job "${jobTitle}" (ID: ${jobId}). Skipping.`);
-            }
-            currentJobIndexOnPage++;
-            continue;
-        }
-
-        const isAlreadySelected = checkboxIcon.classList.contains(CHECKBOX_ACTIVE_CLASS);
-        if (isAlreadySelected) {
-            // console.log(`Content.js (v5): Job "${jobTitle}" (ID: ${jobId}) is ALREADY SELECTED. Skipping.`);
-        } else {
-            if (checkboxIcon.classList.contains('naukicon-ot-checkbox')) { 
-                console.log(`Content.js (v5): Attempting to select job: "${jobTitle}" (ID: ${jobId}).`);
-                await performClick(checkboxContainer, `Job checkbox for "${jobTitle}"`);
-                await sleep(500); 
-                const iconAfterClick = checkboxContainer.querySelector(JOB_CHECKBOX_ICON_SELECTOR); 
-                if (iconAfterClick && iconAfterClick.classList.contains(CHECKBOX_ACTIVE_CLASS)) { 
-                    console.log(`Content.js (v5): SUCCESS - Job "${jobTitle}" (ID: ${jobId}) checkbox is now active.`);
-                    unappliedJobsFoundAndAttemptedThisRun++;
-                } else {
-                    console.warn(`Content.js (v5): FAILURE - Job "${jobTitle}" (ID: ${jobId}) checkbox did NOT become active with class '${CHECKBOX_ACTIVE_CLASS}'.`);
-                }
+        if (checkboxContainer && checkboxIcon && !checkboxIcon.classList.contains(CHECKBOX_ACTIVE_CLASS) && checkboxIcon.classList.contains('naukicon-ot-checkbox')) { 
+            await performClick(checkboxContainer, `Job checkbox`);
+            await sleep(500); 
+            const iconAfterClick = checkboxContainer.querySelector(JOB_CHECKBOX_ICON_SELECTOR); 
+            if (iconAfterClick && iconAfterClick.classList.contains(CHECKBOX_ACTIVE_CLASS)) { 
+                unappliedJobsFoundAndAttemptedThisRun++;
             }
         }
-        currentJobIndexOnPage++;
     }
-    
     jobsSelectedCount = unappliedJobsFoundAndAttemptedThisRun;
-    console.log(`Content.js (v5): Total jobs selected in this run on current tab: ${jobsSelectedCount}`);
-
     if (jobsSelectedCount === 0) {
-        console.log("Content.js (v5): No new jobs were selected in this run on current tab.");
-        chrome.runtime.sendMessage({ command: 'noJobsToApply', message: "No new jobs were selected in this run on current tab." });
+        chrome.runtime.sendMessage({ command: 'noJobsToApply' });
         return;
     }
-
     const applyButton = document.querySelector(MAIN_APPLY_BUTTON_SELECTOR);
     if (applyButton) {
         let retries = 20; 
-        while (applyButton.disabled && retries > 0) {
-            await sleep(500);
-            retries--;
-        }
+        while (applyButton.disabled && retries > 0) { await sleep(500); retries--; }
         if (applyButton.disabled) {
-            console.error("Content.js (v5): Main Apply button did not enable after selecting jobs.");
-            chrome.runtime.sendMessage({ command: 'errorOccurred', error: "Apply button stuck disabled", message: "Apply button did not enable." });
+            chrome.runtime.sendMessage({ command: 'errorOccurred', message: "Apply button did not enable." });
             return;
         }
-        console.log("Content.js (v5): Main Apply button is enabled. Clicking it.");
         if (await performClick(applyButton, "Main Apply button")) {
             chrome.runtime.sendMessage({ command: 'jobsSelectedAndApplied', jobsAttemptedCount: jobsSelectedCount });
-            observeForChatbox();
         } else {
-             chrome.runtime.sendMessage({ command: 'errorOccurred', error: "Failed to click Apply button", message: "Could not click Apply button." });
+             chrome.runtime.sendMessage({ command: 'errorOccurred', message: "Could not click Apply button." });
         }
     } else {
-        console.error(`Content.js (v5): Main Apply button not found with selector '${MAIN_APPLY_BUTTON_SELECTOR}'.`);
-        chrome.runtime.sendMessage({ command: 'errorOccurred', error: "Apply button not found", message: "Main Apply button selector missing." });
+        chrome.runtime.sendMessage({ command: 'errorOccurred', message: "Main Apply button missing." });
     }
-    console.log(`Content.js (v5): --- Finished selectAndApplyJobs ---`);
 }
-
-function observeForChatbox() {
-    if (chatboxObserver) chatboxObserver.disconnect(); 
-    const targetNode = document.body;
-    const config = { childList: true, subtree: true };
-    chatboxObserver = new MutationObserver(() => {
-        const chatboxElement = document.querySelector(CHATBOX_SELECTOR);
-        if (chatboxElement && chatboxElement.offsetParent !== null) { 
-            if (!chatboxElement.querySelector(CHATBOX_LOADER_SELECTOR)) {
-                 console.log("Content.js (v5): Chatbox is not loading. Notifying background.");
-                 chrome.runtime.sendMessage({ command: 'chatboxDetected' });
-                 if(chatboxObserver) chatboxObserver.disconnect(); 
-                 chatboxObserver = null;
-            }
-        }
-    });
-    chatboxObserver.observe(targetNode, config);
-    console.log("Content.js (v5): Observer for chatbox started.");
-    setTimeout(() => {
-        if (chatboxObserver) chatboxObserver.disconnect();
-        chatboxObserver = null;
-    }, 15000);
-}
-
 function runInitialChecks() {
-    const currentURL = window.location.href;
-    console.log("Content.js (v5): runInitialChecks() called. URL:", currentURL);
-    if (currentURL.includes(CONFIRMATION_URL_SUBSTRING_MATCHER)) {
-        console.log("Content.js (v5): On confirmation page.");
-        if (chatboxObserver) chatboxObserver.disconnect();
+    console.log("Content.js: runInitialChecks() called.");
+    if (window.location.href.includes(CONFIRMATION_URL_SUBSTRING_MATCHER)) {
         chrome.runtime.sendMessage({ command: 'confirmationPageReached' });
-    } else if (currentURL.includes(RECOMMENDED_JOBS_URL_MATCHER)) {
-        const existingChatbox = document.querySelector(CHATBOX_SELECTOR);
-        if (existingChatbox && existingChatbox.offsetParent !== null) {
-            if (!existingChatbox.querySelector(CHATBOX_LOADER_SELECTOR)) {
-                chrome.runtime.sendMessage({ command: 'chatboxDetected' });
-            }
-        }
+    } else if (window.location.href.includes(RECOMMENDED_JOBS_URL_MATCHER)) {
+        initializeChatboxDetection(); 
     }
-    console.log("Content.js (v5): runInitialChecks() finished.");
 }
 
-console.log("Content.js (v5): Setting up chrome.runtime.onMessage listener.");
+// --- Message Listener ---
+console.log("Content.js: Setting up chrome.runtime.onMessage listener.");
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const receivedAction = request.action ? String(request.action).trim() : undefined;
-    console.log(`Content.js (v5): Message received. Original action: '${request.action}', Trimmed action: '${receivedAction}'`);
-
-    if (receivedAction === 'selectAndApplyJobs') {
-        console.log(`Content.js (v5): Matched 'selectAndApplyJobs'. StartIndex: ${request.startIndex}`);
-        const attemptSelection = () => {
-            selectAndApplyJobs(request.startIndex, request.maxJobs)
-                .catch(err => {
-                    console.error("Content.js (v5): Error in selectAndApplyJobs promise:", err);
-                    chrome.runtime.sendMessage({ command: 'errorOccurred', error: err.message, message: "Content script failed during job selection." });
-                });
-        };
-        if (document.readyState === "complete" || document.readyState === "interactive") {
-            attemptSelection();
-        } else {
-            window.addEventListener('DOMContentLoaded', attemptSelection, { once: true });
-        }
-        sendResponse({ status: "selectAndApplyJobs_initiated" }); 
-        return true; 
-    } else if (receivedAction === 'switchToTab') {
-        console.log(`Content.js (v5): Matched 'switchToTab'. Target ID: ${request.targetTabId}`);
-        switchToTab(request.targetTabId)
-            .catch(err => {
-                console.error("Content.js (v5): Error in switchToTab promise:", err);
-                chrome.runtime.sendMessage({ command: 'tabSwitchResult', success: false, attemptedTabId: request.targetTabId, error: `Exception during tab switch: ${err.message}` });
-            });
-        sendResponse({ status: "switchToTab_initiated" });
-        return true; 
-    } else {
-        console.log(`Content.js (v5): Received unknown or undefined action. Original: '${request.action}', Trimmed: '${receivedAction}'`);
-        sendResponse({ status: "unknown_action", received_action: receivedAction });
-        // No return true needed here as sendResponse is synchronous for this else block
+    console.log(`Content.js: Message received. Action: '${receivedAction}'`);
+    switch(receivedAction) {
+        case 'detectActiveTab':
+            detectAndSendActiveTab();
+            sendResponse({status: "detectActiveTab_initiated"});
+            break;
+        case 'selectAndApplyJobs':
+            const attemptSelection = () => selectAndApplyJobs(request.startIndex, request.maxJobs).catch(err => console.error("Error in selectAndApplyJobs:", err));
+            if (document.readyState === "complete" || document.readyState === "interactive") attemptSelection();
+            else window.addEventListener('DOMContentLoaded', attemptSelection, { once: true });
+            sendResponse({ status: "selectAndApplyJobs_initiated" }); 
+            break;
+        case 'switchToTab':
+            switchToTab(request.targetTabId).catch(err => console.error("Error in switchToTab:", err));
+            sendResponse({ status: "switchToTab_initiated" });
+            break;
+        default:
+            console.log(`Content.js: Received unknown action: '${receivedAction}'`);
+            sendResponse({ status: "unknown_action" });
     }
+    return true; // Keep channel open for async responses
 });
-console.log("Content.js (v5): chrome.runtime.onMessage listener SET UP.");
+console.log("Content.js: chrome.runtime.onMessage listener SET UP.");
 
 runInitialChecks();
-console.log("Content.js (v5): Script execution finished.");
+console.log("Content.js: Script execution finished initial setup.");

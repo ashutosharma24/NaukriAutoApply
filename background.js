@@ -7,27 +7,26 @@ const MAX_JOBS_TO_SELECT = 5;
 const MESSAGE_RETRY_DELAY = 750; // ms
 const MAX_MESSAGE_RETRIES = 4; 
 const INITIAL_PROCESSING_DELAY = 1500; // ms 
-const TAB_SWITCH_DELAY = 1000; // ms to wait after attempting a tab click
+const QNA_STORAGE_KEY = 'naukriChatQnA_v2';
 
-const TAB_IDS_IN_ORDER = ['top_candidate', 'profile', 'apply', 'preference', 'similar_jobs'];
-
-// Initial state
+// --- State Variables ---
 let automationRunning = false;
-let nextJobStartIndex = 0; // Always 0 for a new tab/page processing
 let currentStatus = "Idle";
-let activeTabId = null;
+let activeTabId = null; // The ID of the browser tab
+let activeProcessingTabId = null; // The ID of the Naukri tab to process (e.g., 'profile', 'top_candidate')
 let jobsAppliedInCurrentBatch = 0; 
-let currentTabIndex = 0; // Index for TAB_IDS_IN_ORDER
-let tabSwitchAttemptedForCurrentPageView = false; // Runtime flag, not stored
+let tabSwitchAttemptedForCurrentPageView = false;
 
-// Function to update status and inform popup
+// --- Core Functions ---
+
 async function updateGlobalStatus(newStatus, newAutomationRunningState = automationRunning) {
     currentStatus = newStatus;
     automationRunning = newAutomationRunningState;
-    console.log(`Background: Status - ${currentStatus}, Running - ${automationRunning}, Current Tab Index - ${currentTabIndex}`);
+    console.log(`Background: Status - ${currentStatus}, Running - ${automationRunning}, Target Tab - ${activeProcessingTabId || 'None'}`);
+    // Store state needed for persistence
     await chrome.storage.local.set({
         automationRunning: automationRunning,
-        currentTabIndex: currentTabIndex, // Store currentTabIndex
+        activeProcessingTabId: activeProcessingTabId, 
         currentStatus: currentStatus
     });
     try {
@@ -41,22 +40,14 @@ async function updateGlobalStatus(newStatus, newAutomationRunningState = automat
     }
 }
 
-// Load initial state from storage
-chrome.runtime.onStartup.addListener(async () => {
-    console.log("Extension started up.");
-    const data = await chrome.storage.local.get(['automationRunning', 'currentTabIndex', 'currentStatus']);
-    automationRunning = data.automationRunning || false;
-    currentTabIndex = data.currentTabIndex || 0;
-    nextJobStartIndex = 0; 
-    currentStatus = data.currentStatus || "Idle";
-    if (automationRunning) {
-        console.log("Automation was running on startup, resetting to Idle.");
-        await updateGlobalStatus("Idle", false); // currentTabIndex will be preserved from storage if needed
-    }
-    console.log("Initial state loaded:", { automationRunning, currentTabIndex, currentStatus });
-});
+async function stopAutomation(reason) {
+    await updateGlobalStatus(reason, false);
+    activeTabId = null;
+    activeProcessingTabId = null; // Clear the target tab on stop
+    chrome.notifications.create({ type: 'basic', iconUrl: 'images/icon48.png', title: 'Naukri Automator', message: reason});
+}
 
-// Listener for messages
+// --- Message Listener ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     (async () => { 
         if (request.command === 'startAutomation') {
@@ -64,54 +55,75 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
                 if (tabs.length > 0) {
                     activeTabId = tabs[0].id;
-                    currentTabIndex = 0; // Start with the first tab in the order
-                    tabSwitchAttemptedForCurrentPageView = false;
-                    await updateGlobalStatus("Starting...", true);
-                    nextJobStartIndex = 0; 
-                    jobsAppliedInCurrentBatch = 0;
-                    if (tabs[0].url && tabs[0].url.includes(RECOMMENDED_JOBS_URL)) {
-                        console.log("Background: Already on recommended jobs page. Adding delay then processing.");
-                        await new Promise(resolve => setTimeout(resolve, INITIAL_PROCESSING_DELAY));
-                        await processRecommendedJobsPage();
-                    } else {
-                        await updateGlobalStatus("Navigating to recommended jobs...", true);
-                        await chrome.tabs.update(activeTabId, { url: RECOMMENDED_JOBS_URL });
-                    }
+                    await updateGlobalStatus("Detecting active tab on page...", true);
+                    // Ask content script for the currently active tab before starting
+                    await sendMessageToContentScriptWithRetry(activeTabId, { action: 'detectActiveTab' });
                 } else {
-                    await updateGlobalStatus("Error: No active tab found.", false);
+                    await stopAutomation("Error: No active tab found.");
                 }
             }
             sendResponse({ automationRunning: automationRunning, status: currentStatus });
-        } else if (request.command === 'stopAutomation') {
-            await updateGlobalStatus("Idle", false);
-            activeTabId = null;
-            sendResponse({ automationRunning: automationRunning, status: currentStatus });
-        } else if (request.command === 'getStatus') {
-            const data = await chrome.storage.local.get(['automationRunning', 'currentStatus', 'currentTabIndex']);
-            sendResponse({ automationRunning: data.automationRunning || automationRunning, status: data.currentStatus || currentStatus, currentTabIndex: data.currentTabIndex || 0 });
-        } else if (request.command === 'jobsSelectedAndApplied') {
-            jobsAppliedInCurrentBatch = request.jobsAttemptedCount; 
-            await updateGlobalStatus(`Applied to ${jobsAppliedInCurrentBatch} jobs on tab '${TAB_IDS_IN_ORDER[currentTabIndex]}'. Waiting...`, true);
-        } else if (request.command === 'chatboxDetected') {
-            await updateGlobalStatus("Chatbox detected. Waiting for user...", true);
-        } else if (request.command === 'confirmationPageReached') {
-            await handleApplicationConfirmation();
-        } else if (request.command === 'tabSwitchResult') {
-            if (request.success) {
-                console.log(`Background: Successfully switched to/confirmed tab '${request.switchedToTabId}'. Proceeding to select jobs.`);
-                await updateGlobalStatus(`On tab '${request.switchedToTabId}'. Selecting jobs...`, true);
-                await selectJobsOnCurrentPage(); // New function to just select jobs
+        } 
+        else if (request.command === 'setActiveTabAndStart') {
+            if (request.activeTabId) {
+                activeProcessingTabId = request.activeTabId;
+                tabSwitchAttemptedForCurrentPageView = false;
+                await updateGlobalStatus(`Target tab set to '${activeProcessingTabId}'. Starting...`, true);
+                await processRecommendedJobsPage();
             } else {
-                console.warn(`Background: Failed to switch to tab '${request.attemptedTabId}'. Error: ${request.error}. Trying next tab.`);
-                await handleNoJobsOrTabSwitchFail();
+                await stopAutomation(`Error: Could not detect an active Naukri tab. Please select a tab like 'Profile' or 'Top Candidate' and try again.`);
             }
-        } else if (request.command === 'noJobsToApply') {
-            console.log(`Background: No more selectable jobs on tab '${TAB_IDS_IN_ORDER[currentTabIndex]}'. Trying next tab.`);
-            await handleNoJobsOrTabSwitchFail();
-        } else if (request.command === 'errorOccurred') {
-            console.error("Background: Error from content script:", request.error, "Message:", request.message);
-            await updateGlobalStatus(`Error: ${request.message}. Stopping.`, false);
-        } else {
+        }
+        else if (request.command === 'stopAutomation') {
+            await stopAutomation("Stopped by user.");
+            sendResponse({ automationRunning: false, status: currentStatus });
+        } 
+        else if (request.command === 'getStatus') {
+            const data = await chrome.storage.local.get(['automationRunning', 'currentStatus', 'activeProcessingTabId']);
+            sendResponse({ automationRunning: data.automationRunning || false, status: data.currentStatus || "Idle", activeProcessingTabId: data.activeProcessingTabId || null });
+        } 
+        else if (request.command === 'jobsSelectedAndApplied') {
+            jobsAppliedInCurrentBatch = request.jobsAttemptedCount; 
+            await updateGlobalStatus(`Applied to ${jobsAppliedInCurrentBatch} jobs on tab '${activeProcessingTabId}'. Waiting...`, true);
+        } 
+        else if (request.command === 'chatboxQuestionPresented') {
+            await updateGlobalStatus(`Chatbox: Question - "${request.questionText.substring(0,50)}..."`, true);
+        } 
+        else if (request.command === 'confirmationPageReached') {
+            await handleApplicationConfirmation();
+        } 
+        else if (request.command === 'tabSwitchResult') {
+             if (request.success) {
+                console.log(`Background: Successfully on tab '${request.switchedToTabId}'. Selecting jobs.`);
+                await updateGlobalStatus(`On tab '${request.switchedToTabId}'. Selecting jobs...`, true);
+                await selectJobsOnCurrentPage(); 
+            } else {
+                await stopAutomation(`Error: Failed to switch to target tab '${request.attemptedTabId}'.`);
+            }
+        } 
+        else if (request.command === 'noJobsToApply') {
+            await stopAutomation(`No more selectable jobs found on tab '${activeProcessingTabId}'.`);
+        } 
+        else if (request.command === 'errorOccurred') {
+            await stopAutomation(`Error: ${request.message}.`);
+        } 
+        // Q&A Handlers
+        else if (request.command === 'getChatAnswer') {
+            const { normalizedQuestion } = request;
+            const data = await chrome.storage.local.get(QNA_STORAGE_KEY);
+            const qnaStore = data[QNA_STORAGE_KEY] || {};
+            const answerData = qnaStore[normalizedQuestion] || null;
+            sendResponse({ answerData });
+        } 
+        else if (request.command === 'storeChatAnswer') {
+            const { normalizedQuestion, answer, inputType, answerSource } = request;
+            const data = await chrome.storage.local.get(QNA_STORAGE_KEY);
+            const qnaStore = data[QNA_STORAGE_KEY] || {};
+            qnaStore[normalizedQuestion] = { answer, inputType, lastUpdated: Date.now(), source: answerSource || 'user_provided' };
+            await chrome.storage.local.set({ [QNA_STORAGE_KEY]: qnaStore });
+            sendResponse({ success: true });
+        }
+        else {
             console.log("Background: Received unhandled message command:", request.command);
             sendResponse({status: "unhandled_command", command: request.command});
         }
@@ -119,166 +131,120 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true; 
 });
 
-async function handleNoJobsOrTabSwitchFail() {
-    currentTabIndex++;
-    tabSwitchAttemptedForCurrentPageView = false; // Reset for the new tab
-    if (currentTabIndex < TAB_IDS_IN_ORDER.length) {
-        const nextTabId = TAB_IDS_IN_ORDER[currentTabIndex];
-        await updateGlobalStatus(`Switching to next tab: '${nextTabId}'...`, true);
-        await processRecommendedJobsPage(); // This will trigger the tab switch logic
-    } else {
-        await updateGlobalStatus("All tabs processed. No more jobs. Stopping.", false);
-        chrome.notifications.create({ type: 'basic', iconUrl: 'images/icon48.png', title: 'Naukri Automator', message: 'All tabs processed. Automation stopped.'});
-    }
-}
 
-// Listener for tab updates
+// --- Event Listeners & Core Logic ---
+
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (tabId === activeTabId && changeInfo.status === 'complete' && automationRunning) {
-        console.log(`Background: Tab updated. URL: ${tab.url}, Current Status: ${currentStatus}`);
         if (tab.url && tab.url.includes(RECOMMENDED_JOBS_URL)) {
             if (currentStatus !== "Idle" && !currentStatus.startsWith("Error:")) {
-                 console.log("Background: Reached recommended jobs page. Resetting tab switch flag and adding delay.");
-                 tabSwitchAttemptedForCurrentPageView = false; // Reset for the reloaded page
+                 console.log("Background: Returned to recommended jobs page. Adding delay before processing.");
+                 tabSwitchAttemptedForCurrentPageView = false; 
                  await new Promise(resolve => setTimeout(resolve, INITIAL_PROCESSING_DELAY));
                  await processRecommendedJobsPage();
-            } else {
-                console.log("Background: Tab updated to recommended jobs, but no processing due to status:", currentStatus);
             }
         } else if (tab.url && tab.url.includes(CONFIRMATION_URL_SUBSTRING)) {
-            if (currentStatus.startsWith("Applied to") || currentStatus.startsWith("Chatbox detected") || currentStatus.startsWith("Waiting")) {
+            if (currentStatus.startsWith("Applied to") || currentStatus.includes("Chatbox") || currentStatus.startsWith("Waiting")) {
                  await handleApplicationConfirmation();
             }
         }
     }
 });
 
-async function sendMessageToContentScriptWithRetry(tabId, message, retries = MAX_MESSAGE_RETRIES) {
-    try {
-        await chrome.tabs.get(tabId); 
-        // console.log(`Background: Attempting to send message to tab ${tabId}, retries left: ${retries}`, message); // Can be noisy
-        const response = await chrome.tabs.sendMessage(tabId, message);
-        // console.log("Background: Message sent successfully, response:", response); // Can be noisy
-        return response;
-    } catch (error) {
-        if (retries > 0 && (error.message.includes("Could not establish connection") || error.message.includes("No tab with id") || error.message.includes("Receiving end does not exist"))) {
-            console.warn(`Background: Connection error with tab ${tabId} ("${error.message}"). Retrying in ${MESSAGE_RETRY_DELAY}ms... (${retries -1} retries left)`);
-            await new Promise(resolve => setTimeout(resolve, MESSAGE_RETRY_DELAY));
-            return sendMessageToContentScriptWithRetry(tabId, message, retries - 1);
-        } else {
-            console.error(`Background: Error sending message to content script in tab ${tabId} after all retries or for a different error:`, error);
-            throw error; 
-        }
-    }
-}
-
 async function processRecommendedJobsPage() {
-    if (!automationRunning || !activeTabId) {
-        console.log("Background: processRecommendedJobsPage check: Automation not running or no active tab.");
+    if (!automationRunning || !activeTabId || !activeProcessingTabId) {
+        console.log("Background: processRecommendedJobsPage check failed: Automation not running, no active tab, or no target Naukri tab set.");
+        // Don't stop here, might be in a transient state. Let the flow correct itself.
         return;
     }
     
-    if (currentTabIndex >= TAB_IDS_IN_ORDER.length) {
-        console.log("Background: All tabs have been processed according to currentTabIndex.");
-        await updateGlobalStatus("All tabs processed. Stopping.", false);
-        chrome.notifications.create({ type: 'basic', iconUrl: 'images/icon48.png', title: 'Naukri Automator', message: 'Finished all configured tabs.'});
-        return;
-    }
-
-    const targetTabId = TAB_IDS_IN_ORDER[currentTabIndex];
-
     if (!tabSwitchAttemptedForCurrentPageView) {
-        console.log(`Background: Attempting to switch to tab: '${targetTabId}' (Index: ${currentTabIndex})`);
-        await updateGlobalStatus(`Switching to tab '${targetTabId}'...`, true);
+        console.log(`Background: Attempting to switch to user-selected tab: '${activeProcessingTabId}'`);
+        await updateGlobalStatus(`Verifying/switching to tab '${activeProcessingTabId}'...`, true);
         try {
             await sendMessageToContentScriptWithRetry(activeTabId, {
                 action: 'switchToTab',
-                targetTabId: targetTabId
+                targetTabId: activeProcessingTabId
             });
             tabSwitchAttemptedForCurrentPageView = true;
-            // Wait for 'tabSwitchResult' message from content.js
         } catch (error) {
-            console.error(`Background: Failed to send switchToTab message for '${targetTabId}'. Error: ${error.message}`);
-            await handleNoJobsOrTabSwitchFail(); // Treat as a tab switch failure
+            await stopAutomation(`Error: Failed to send 'switchToTab' message.`);
         }
     } else {
-        // Tab switch was already attempted for this page view (or not needed initially)
-        // This path is usually taken after a successful tabSwitchResult
-        console.log(`Background: Tab switch already handled for this view (tab '${targetTabId}'). Proceeding to select jobs.`);
+        console.log(`Background: Tab switch already handled for this view. Proceeding to select jobs.`);
         await selectJobsOnCurrentPage();
     }
 }
 
 async function selectJobsOnCurrentPage() {
     if (!automationRunning || !activeTabId) return;
-
-    nextJobStartIndex = 0; 
-    const currentProcessingTabId = TAB_IDS_IN_ORDER[currentTabIndex] || "unknown";
-    console.log(`Background: Set nextJobStartIndex to 0 for processing tab '${currentProcessingTabId}'.`);
+    const currentProcessingTabId = activeProcessingTabId || "unknown";
     await updateGlobalStatus(`Selecting jobs on tab '${currentProcessingTabId}'...`, true);
-
     try {
-        await sendMessageToContentScriptWithRetry(activeTabId, {
-            action: 'selectAndApplyJobs',
-            startIndex: nextJobStartIndex, 
-            maxJobs: MAX_JOBS_TO_SELECT
-        });
+        await sendMessageToContentScriptWithRetry(activeTabId, { action: 'selectAndApplyJobs', startIndex: 0, maxJobs: MAX_JOBS_TO_SELECT });
     } catch (error) {
-        console.error(`Background: Failed to send 'selectAndApplyJobs' message for tab '${currentProcessingTabId}'.`, error.message);
-        // If communication fails here, it's a more critical error, stop.
-        await updateGlobalStatus(`Error: Failed to communicate with page on tab '${currentProcessingTabId}'. Stopping.`, false);
+        await stopAutomation(`Error: Failed to communicate on tab '${currentProcessingTabId}'.`);
     }
 }
-
 
 async function handleApplicationConfirmation() {
     if (!automationRunning) return;
-    if (currentStatus === "Application confirmed. Returning to jobs page..." || currentStatus === "Returning to jobs page...") {
-        return;
-    }
-    const confirmedOnTab = TAB_IDS_IN_ORDER[currentTabIndex] || "unknown";
-    await updateGlobalStatus(`Application confirmed on tab '${confirmedOnTab}'. Returning to jobs page...`, true);
-    
-    await chrome.storage.local.set({ nextJobStartIndex: 0 }); // nextJobStartIndex is always 0 for a new page view
-    console.log(`Background: Application confirmed. nextJobStartIndex will be 0 for next cycle on tab '${confirmedOnTab}'.`);
+    if (currentStatus.startsWith("Application confirmed.")) return; 
+    const confirmedOnTab = activeProcessingTabId || "unknown";
+    await updateGlobalStatus(`Application confirmed on tab '${confirmedOnTab}'. Returning...`, true);
     jobsAppliedInCurrentBatch = 0; 
-
     if (activeTabId) {
         try {
-            // When navigating back, tabSwitchAttemptedForCurrentPageView will be reset by onUpdated listener
             await chrome.tabs.update(activeTabId, { url: RECOMMENDED_JOBS_URL });
         } catch (error) {
-            console.error("Background: Error navigating back:", error);
-            await updateGlobalStatus("Error: Failed to navigate back. Stopping.", false);
+            await stopAutomation("Error: Failed to navigate back.");
             if (error.message.includes("No tab with id")) activeTabId = null;
         }
     } else {
-        await updateGlobalStatus("Error: No active tab to navigate back. Stopping.", false);
+        await stopAutomation("Error: No active tab to navigate back.");
     }
 }
 
-// Clean up if the tab is closed
-chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+async function sendMessageToContentScriptWithRetry(tabId, message, retries = MAX_MESSAGE_RETRIES) {
+    try {
+        await chrome.tabs.get(tabId); 
+        const response = await chrome.tabs.sendMessage(tabId, message);
+        return response;
+    } catch (error) {
+        if (retries > 0 && (error.message.includes("Could not establish connection") || error.message.includes("Receiving end does not exist"))) {
+            console.warn(`Background: Connection error to tab ${tabId}. Retrying... (${retries -1} left)`);
+            await new Promise(resolve => setTimeout(resolve, MESSAGE_RETRY_DELAY));
+            return sendMessageToContentScriptWithRetry(tabId, message, retries - 1);
+        } else {
+            console.error(`Background: Final error sending message to tab ${tabId}:`, error);
+            throw error; 
+        }
+    }
+}
+
+// --- Startup & Cleanup ---
+chrome.tabs.onRemoved.addListener(async (tabId) => {
     if (tabId === activeTabId && automationRunning) {
-        console.log("Background: Active tab closed. Stopping.");
-        await updateGlobalStatus("Idle (Tab Closed)", false);
-        activeTabId = null;
+        await stopAutomation("Idle (Tab Closed)");
     }
 });
 
-// Initial load of state
 (async () => {
     console.log("Service worker active/re-activated.");
-    const data = await chrome.storage.local.get(['automationRunning', 'currentTabIndex', 'currentStatus']);
+    // On reactivation, retrieve running state but clear the specific processing tab ID.
+    // The user will need to start again to define the target tab.
+    const data = await chrome.storage.local.get(['automationRunning', 'currentStatus', QNA_STORAGE_KEY]);
     automationRunning = data.automationRunning || false;
-    currentTabIndex = data.currentTabIndex || 0;
-    nextJobStartIndex = 0; 
-    if (automationRunning && (data.currentStatus !== "Idle" && !data.currentStatus.startsWith("Error:"))) {
-        currentStatus = "Idle (Recovered)";
-        automationRunning = false; 
-    } else {
-        currentStatus = data.currentStatus || "Idle";
+    activeProcessingTabId = null; // Important: Force re-detection of tab on new session
+
+    if (data[QNA_STORAGE_KEY] === undefined) {
+        await chrome.storage.local.set({ [QNA_STORAGE_KEY]: {} });
     }
-    await updateGlobalStatus(currentStatus, automationRunning); 
-    console.log("Service worker initialized state:", { automationRunning, currentTabIndex, currentStatus });
+    if (automationRunning) {
+        // If it was running, it's safer to reset to Idle as the context is lost
+        await updateGlobalStatus("Idle (Recovered)", false); 
+    } else {
+        await updateGlobalStatus(data.currentStatus || "Idle", false);
+    }
+    console.log("Service worker initialized.");
 })();
