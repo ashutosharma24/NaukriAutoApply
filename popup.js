@@ -1,94 +1,90 @@
-// Get references to the buttons and status display
-const startButton = document.getElementById('startAutomation');
-const stopButton = document.getElementById('stopAutomation');
-const statusDisplay = document.getElementById('status');
+// popup.js
 
-// Function to update button states and status display
-function updateUI(automationRunning, currentStatus) {
-    if (automationRunning) {
-        startButton.classList.add('disabled');
-        startButton.disabled = true;
-        stopButton.classList.remove('disabled');
-        stopButton.disabled = false;
-    } else {
-        startButton.classList.remove('disabled');
-        startButton.disabled = false;
-        stopButton.classList.add('disabled');
-        stopButton.disabled = true;
-    }
+document.addEventListener("DOMContentLoaded", () => {
+  const startButton = document.getElementById("startAutomation");
+  const stopButton = document.getElementById("stopAutomation");
+  const statusDisplay = document.getElementById("status");
+  const mustHaveKeywordsInput = document.getElementById("mustHaveKeywords");
+  const goodToHaveKeywordsInput = document.getElementById("goodToHaveKeywords");
+  const saveKeywordsButton = document.getElementById("saveKeywords");
+  const saveKeywordsStatus = document.getElementById("saveKeywordsStatus");
+
+  function updateUI(automationRunning, currentStatus) {
+    startButton.disabled = automationRunning;
+    stopButton.disabled = !automationRunning;
+    startButton.classList.toggle("disabled", automationRunning);
+    stopButton.classList.toggle("disabled", !automationRunning);
     statusDisplay.textContent = `Status: ${currentStatus}`;
-}
+  }
 
-// Add event listener for the "Start Automation" button
-startButton.addEventListener('click', () => {
+  startButton.addEventListener("click", () => {
     if (!startButton.disabled) {
-        // Send a message to the background script to start automation
-        chrome.runtime.sendMessage({ command: 'startAutomation' }, (response) => {
-            if (chrome.runtime.lastError) {
-                statusDisplay.textContent = 'Error: Could not connect to service worker.';
-                console.error("Error sending startAutomation message:", chrome.runtime.lastError.message);
-                return;
-            }
-            if (response) {
-                updateUI(response.automationRunning, response.status);
-            }
-        });
+      chrome.runtime.sendMessage({ command: "startAutomation" });
     }
-});
+  });
 
-// Add event listener for the "Stop Automation" button
-stopButton.addEventListener('click', () => {
+  stopButton.addEventListener("click", () => {
     if (!stopButton.disabled) {
-        // Send a message to the background script to stop automation
-        chrome.runtime.sendMessage({ command: 'stopAutomation' }, (response) => {
-             if (chrome.runtime.lastError) {
-                statusDisplay.textContent = 'Error: Could not connect to service worker.';
-                console.error("Error sending stopAutomation message:", chrome.runtime.lastError.message);
-                return;
-            }
-            if (response) {
-                updateUI(response.automationRunning, response.status);
-            }
-        });
+      chrome.runtime.sendMessage({ command: "stopAutomation" });
     }
-});
+  });
 
-// Request initial status when the popup is opened
-chrome.runtime.sendMessage({ command: 'getStatus' }, (response) => {
-    if (chrome.runtime.lastError) {
-        statusDisplay.textContent = 'Error: Could not connect to service worker.';
-        console.error("Error sending getStatus message:", chrome.runtime.lastError.message);
-        // Attempt to give a default state if background isn't ready
-        updateUI(false, "Idle (Error connecting)");
+  saveKeywordsButton.addEventListener("click", () => {
+    const mustHaveText = mustHaveKeywordsInput.value.trim();
+    const goodToHaveText = goodToHaveKeywordsInput.value.trim();
+    const mustHaveKeywords = mustHaveText
+      .split(",")
+      .map((k) => k.trim().toLowerCase())
+      .filter((k) => k);
+    const goodToHaveKeywords = goodToHaveText
+      .split(",")
+      .map((k) => k.trim().toLowerCase())
+      .filter((k) => k);
+
+    chrome.storage.local.set({ mustHaveKeywords, goodToHaveKeywords }, () => {
+      console.log("Keywords saved:", { mustHaveKeywords, goodToHaveKeywords });
+      saveKeywordsStatus.textContent = "Keywords Saved!";
+      setTimeout(() => {
+        saveKeywordsStatus.textContent = "";
+      }, 2000);
+    });
+  });
+
+  function loadKeywords() {
+    chrome.storage.local.get(
+      ["mustHaveKeywords", "goodToHaveKeywords"],
+      (data) => {
+        if (data.mustHaveKeywords) {
+          mustHaveKeywordsInput.value = data.mustHaveKeywords.join(", ");
+        }
+        if (data.goodToHaveKeywords) {
+          goodToHaveKeywordsInput.value = data.goodToHaveKeywords.join(", ");
+        }
+      }
+    );
+  }
+
+  function initializePopup() {
+    chrome.runtime.sendMessage({ command: "getStatus" }, (response) => {
+      if (chrome.runtime.lastError) {
+        statusDisplay.textContent =
+          "Error: " + chrome.runtime.lastError.message;
+        updateUI(false, "Error connecting");
         return;
-    }
-    if (response) {
-        updateUI(response.automationRunning, response.status);
-    } else {
-        // Handle cases where background script might not have responded yet or is inactive
-        // This can happen if the service worker was inactive and is just starting up.
-        // We can set a default state and perhaps try again shortly, or rely on user action.
-        console.warn("No response to getStatus, background script might be initializing.");
-        updateUI(false, "Initializing..."); // A temporary status
-        // Optionally, try to get status again after a short delay
-        setTimeout(() => {
-            chrome.runtime.sendMessage({ command: 'getStatus' }, (delayedResponse) => {
-                if (delayedResponse) {
-                     updateUI(delayedResponse.automationRunning, delayedResponse.status);
-                } else if (chrome.runtime.lastError) {
-                     console.error("Delayed getStatus failed:", chrome.runtime.lastError.message);
-                     statusDisplay.textContent = 'Error: Service worker unavailable.';
-                }
-            });
-        }, 500);
-    }
-});
+      }
+      if (response) updateUI(response.automationRunning, response.status);
+    });
+    loadKeywords();
+  }
 
-// Listen for status updates from the background script
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.command === 'updateStatus') {
-        updateUI(request.automationRunning, request.status);
-        sendResponse({ received: true });
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.command === "updateStatus") {
+      updateUI(request.automationRunning, request.status);
     }
-    return true; // Keep the message channel open for asynchronous sendResponse
+    // It's good practice to send a dummy response if the channel is not used further
+    sendResponse({ received: true });
+    return true;
+  });
+
+  initializePopup();
 });
