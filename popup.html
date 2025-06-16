@@ -1,59 +1,123 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Naukri Automator</title>
     <style>
-        body {
-            font-family: sans-serif;
-            width: 250px;
-            padding: 15px;
-            text-align: center;
-            background-color: #f4f7f6;
-        }
-        h3 {
-            color: #333;
-            margin-top: 0;
-        }
-        button {
-            background-color: #4A90E2;
-            color: white;
-            border: none;
-            padding: 10px 15px;
-            margin: 8px 0;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: background-color 0.3s ease;
-            width: 100%;
-        }
-        button:hover {
-            background-color: #357ABD;
-        }
-        button#stopAutomation {
-            background-color: #D0021B;
-        }
-        button#stopAutomation:hover {
-            background-color: #A00113;
-        }
-        p#status {
-            margin-top: 15px;
-            font-size: 13px;
-            color: #555;
-            min-height: 20px;
-        }
-        .disabled {
-            background-color: #ccc !important;
-            cursor: not-allowed !important;
-        }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        width: 300px;
+        padding: 15px;
+        text-align: center;
+        background-color: #f7f7f7;
+        font-size: 14px;
+      }
+      h3 {
+        color: #333;
+        margin-top: 0;
+        margin-bottom: 15px;
+      }
+      button {
+        background-color: #007bff;
+        color: white;
+        border: none;
+        padding: 10px 15px;
+        margin: 8px 0;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        transition: background-color 0.2s ease-in-out;
+        width: 100%;
+      }
+      button:hover:not(:disabled) {
+        background-color: #0056b3;
+      }
+      button#stopAutomation {
+        background-color: #dc3545;
+      }
+      button#stopAutomation:hover:not(:disabled) {
+        background-color: #c82333;
+      }
+      p#status {
+        margin-top: 15px;
+        font-size: 13px;
+        color: #555;
+        min-height: 20px;
+        background-color: #e9ecef;
+        padding: 8px;
+        border-radius: 4px;
+        word-wrap: break-word;
+      }
+      .disabled {
+        background-color: #ccc !important;
+        cursor: not-allowed !important;
+      }
+      .keyword-section {
+        margin-top: 20px;
+        text-align: left;
+        border-top: 1px solid #ddd;
+        padding-top: 15px;
+      }
+      .keyword-section label {
+        font-weight: 600;
+        display: block;
+        margin-bottom: 5px;
+        color: #444;
+      }
+      .keyword-section textarea {
+        width: calc(100% - 16px);
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #ccc;
+        margin-bottom: 10px;
+        font-family: inherit;
+        font-size: 13px;
+        resize: vertical;
+      }
+      .keyword-section small {
+        color: #6c757d;
+        font-size: 12px;
+      }
+      #saveKeywordsStatus {
+        color: green;
+        font-size: 12px;
+        text-align: center;
+        min-height: 15px;
+        margin-top: 5px;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <h3>Naukri Automator</h3>
     <button id="startAutomation">Start Automation</button>
     <button id="stopAutomation">Stop Automation</button>
     <p id="status">Status: Idle</p>
+
+    <div class="keyword-section">
+      <label for="mustHaveKeywords">Must-Have Keywords</label>
+      <textarea
+        id="mustHaveKeywords"
+        rows="3"
+        placeholder="e.g., java, python, spring boot"
+      ></textarea>
+      <small>Jobs must have at least ONE of these tags.</small>
+
+      <label for="goodToHaveKeywords" style="margin-top: 15px"
+        >Good-to-Have Keywords</label
+      >
+      <textarea
+        id="goodToHaveKeywords"
+        rows="2"
+        placeholder="e.g., microservices, cloud, docker"
+      ></textarea>
+      <small>Optional. Used for logging better matches.</small>
+
+      <button id="saveKeywords">Save Keywords</button>
+      <div id="saveKeywordsStatus"></div>
+    </div>
     <script src="popup.js"></script>
-</body>
+  </body>
 </html>
